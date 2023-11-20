@@ -8,6 +8,7 @@
 #include "../common.h"
 #include "../utils.cuh"
 #include "../util/vectorized_pointwise.h"
+#include "concurrency.h"
 
 namespace transformer_engine {
 
@@ -43,6 +44,7 @@ void fp8_quantize(const Tensor &input,
   NVTE_CHECK(output->data.shape == input.data.shape, "Input and output shapes need to match.");
 
   const size_t N = product(input.data.shape);
+
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(input.data.dtype, IType,
     TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(output->data.dtype, OType,
       constexpr int nvec = 32 / sizeof(IType);
@@ -88,6 +90,49 @@ void fp8_dequantize(const Tensor &input,
   );  // NOLINT(*)
 }
 
+// mscclpp::DeviceSyncer* device_syncer = nullptr;
+
+void add_to_fp8(const Tensor& input, Tensor* output, cudaStream_t stream) {
+  CheckInputTensor(input, "add_to_fp8_input");
+  CheckOutputTensor(*output, "add_to_fp8_output");
+  NVTE_CHECK(!is_fp8_dtype(input.data.dtype),
+             "Input must be in higher precision.");
+
+  NVTE_CHECK(is_fp8_dtype(output->data.dtype),
+             "Output must have FP8 type.");
+  NVTE_CHECK(output->data.shape == input.data.shape, "Input and output shapes need to match.");
+
+  const size_t N = product(input.data.shape);
+
+  // mscclpp::DeviceSyncer* device_syncer = nullptr;
+  // if (device_syncer == nullptr)
+  // {
+  //   mscclpp::DeviceSyncer device_syncer_host;
+  //   memset(&device_syncer_host, 0, sizeof(mscclpp::DeviceSyncer));
+
+  //   cudaMalloc(&device_syncer, sizeof(mscclpp::DeviceSyncer));
+  //   cudaMemcpy(device_syncer, &device_syncer_host, sizeof(mscclpp::DeviceSyncer), cudaMemcpyHostToDevice);
+  // }
+  
+  TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(input.data.dtype, IType,
+    TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(output->data.dtype, OType,
+      constexpr int nvec = 32 / sizeof(IType);
+      VectorizedAddToFp8KernelLauncher<nvec, detail::Empty, detail::identity>(
+          reinterpret_cast<IType*>(input.data.dptr),
+          reinterpret_cast<OType*>(output->data.dptr),
+          reinterpret_cast<fp32*>(output->scale.dptr),
+          reinterpret_cast<fp32 *>(output->scale_inv.dptr),
+          reinterpret_cast<fp32*>(output->amax.dptr),
+          N,
+          {},
+          stream,
+          nullptr);
+    );  // NOLINT(*)
+  );  // NOLINT(*)
+
+  // cudaFree(device_syncer);
+}
+
 }  // namespace transformer_engine
 
 void nvte_fp8_quantize(const NVTETensor input,
@@ -108,4 +153,14 @@ void nvte_fp8_dequantize(const NVTETensor input,
   fp8_dequantize(*reinterpret_cast<const Tensor*>(input),
                  reinterpret_cast<Tensor*>(output),
                  stream);
+}
+
+void nvte_add_to_fp8(NVTETensor input,
+                   NVTETensor output, 
+                   cudaStream_t stream) {
+  NVTE_API_CALL(nvte_add_to_fp8);
+  using namespace transformer_engine;
+  add_to_fp8(*reinterpret_cast<const Tensor*>(input),
+             reinterpret_cast<Tensor*>(output),
+             stream);
 }

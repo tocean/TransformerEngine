@@ -73,3 +73,25 @@ at::Tensor cast_from_fp8(const at::Tensor &input,
 
     return output;
 }
+
+
+void add_to_fp8(at::Tensor fp8_tensor,
+                at::Tensor scale,
+                at::Tensor scale_inv,
+                at::Tensor amax,
+                transformer_engine::DType otype,
+                const at::Tensor &other
+) {
+    using namespace transformer_engine;
+    auto input_shape = other.sizes().vec();
+    std::vector<size_t> shape{input_shape.begin(), input_shape.end()};
+    auto other_cu     = makeTransformerEngineTensor(other);
+    auto fp8_tensor_cu    = makeTransformerEngineTensor(fp8_tensor.data_ptr(), shape, otype,
+                                                    amax.data_ptr(), scale.data_ptr(),
+                                                    scale_inv.data_ptr());
+
+    nvte_add_to_fp8(other_cu.data(), fp8_tensor_cu.data(),
+                      at::cuda::getCurrentCUDAStream());
+
+    return;
+}

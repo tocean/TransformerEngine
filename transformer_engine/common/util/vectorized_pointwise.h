@@ -10,6 +10,7 @@
 #include <type_traits>
 #include "../common.h"
 #include "../utils.cuh"
+#include "concurrency.h"
 
 namespace transformer_engine {
 
@@ -230,6 +231,122 @@ __global__ void unary_kernel(const InputType *input,
   }
 }
 
+extern __device__ mscclpp::DeviceSyncer device_syncer;
+
+template <int nvec, bool aligned,
+          typename ComputeType,
+          typename Param,
+          ComputeType (*OP)(ComputeType, const Param&),
+          typename InputType,
+          typename OutputType>
+__launch_bounds__(unary_kernel_threads)
+__global__ void add_to_fp8_kernel(InputType *input,
+                             OutputType *output,
+                             ComputeType *scale,
+                             ComputeType *scale_inv,
+                             ComputeType *amax,
+                             Param p,
+                             const size_t N,
+                             const size_t num_aligned_elements,
+                             mscclpp::DeviceSyncer* p_device_syncer 
+                             ) {
+  // if (threadIdx.x == 0) {
+  //   printf("device_syncer: %d,%d,%d\n",device_syncer.count_, device_syncer.flag_, device_syncer.isAdd_);
+  // }
+  // input is high precision, output is fp8
+  VectorizedStorer<OutputType, nvec, aligned> output_storer(output, N);
+  VectorizedStorer<InputType, nvec, aligned> input_storer(input, N);
+
+  ComputeType max = 0;
+  ComputeType s = 0;
+  if constexpr (is_fp8<OutputType>::value) {
+      if (scale_inv != nullptr) s = *scale_inv;
+  }
+  const int warp_id = threadIdx.x / THREADS_PER_WARP;
+
+  const size_t M = num_aligned_elements;
+
+  for (size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+       tid < M;
+       tid += gridDim.x * blockDim.x) {
+    input_storer.load(tid, N);
+    output_storer.load(tid, N);
+    // loader2.load(tid, N);
+#pragma unroll
+    for (int i = 0; i < nvec; ++i) {
+      const ComputeType val1 = static_cast<InputType>(output_storer.separate()[i]);
+      const ComputeType val2 = static_cast<InputType>(input_storer.separate()[i]);
+
+      // ComputeType temp = val1 * s + val2;
+      ComputeType temp = val1 * s + val2;
+      if constexpr (is_fp8<OutputType>::value) {
+        __builtin_assume(max >= 0);
+        max = fmaxf(fabsf(static_cast<InputType>(temp)), max);
+      }
+      // input_storer.separate()[i] = static_cast<InputType>(temp);
+    }
+    // input_storer.store(tid, N);
+  }
+  if constexpr (is_fp8<OutputType>::value) {
+    /* warp tile amax reduce*/
+    max = reduce_max<unary_kernel_threads / THREADS_PER_WARP>(max, warp_id);
+
+    if (threadIdx.x == 0 && amax != nullptr) {
+        static_assert(std::is_same<ComputeType, float>::value);
+        atomicMaxFloat(amax, max);
+    }
+  }
+
+  device_syncer.sync(gridDim.x, -1);
+
+  /* Compute scaling factor, translate the following python code to c++:
+    exp = torch.floor(torch.log2(fp_max / amax)) - margin
+    sf = torch.round(torch.pow(2, torch.abs(exp)))
+    sf = torch.where(amax > 0.0, sf, scale)
+    sf = torch.where(torch.isfinite(amax), sf, scale)
+    sf = torch.where(exp < 0, 1 / sf, sf)
+  */
+  ComputeType fp_max = 0.0;
+  if (std::is_same<OutputType, fp8e4m3>::value) {
+    fp_max = 448.0;
+  } else if (std::is_same<OutputType, fp8e5m2>::value) {
+    fp_max = 57344.0;
+  } 
+  
+  ComputeType amax_value = *amax;
+  ComputeType exp = floorf(log2f(fp_max/(amax_value)));
+  ComputeType sf = roundf(powf(2, fabsf(exp)));
+
+  if (amax_value <= 0 || !isfinite(amax_value)) {
+    sf = *scale;
+  }
+
+  if (exp < 0) {
+    sf = 1 / sf;
+  }
+
+  *scale = sf;
+
+  // using new scaling factor to quantize the input
+  for (size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+       tid < M;
+       tid += gridDim.x * blockDim.x) {
+    input_storer.load(tid, N);
+    output_storer.load(tid, N);
+#pragma unroll
+    for (int i = 0; i < nvec; ++i) {
+      const ComputeType val1 = static_cast<ComputeType>(input_storer.separate()[i]);
+      const ComputeType val2 = static_cast<ComputeType>(output_storer.separate()[i]);
+      ComputeType temp = sf * (val2 * s + val1);
+      output_storer.separate()[i] = static_cast<OutputType>(temp);
+    }
+    output_storer.store(tid, N);
+  }
+  *scale_inv = 1.0 / sf;
+  
+}
+
+
 template <int nvec, bool aligned,
           typename ComputeType,
           typename Param,
@@ -383,6 +500,52 @@ void VectorizedUnaryKernelLauncher(const InputType *input,
     }
   }
 }
+
+
+template <int nvec, typename Param,
+          fp32 (*OP)(const fp32, const Param&),
+          typename InputType,
+          typename OutputType>
+void VectorizedAddToFp8KernelLauncher(InputType *input,
+                                      OutputType *output,
+                                      fp32 *scale,
+                                      fp32 *scale_inv,
+                                      fp32 *amax,
+                                      const size_t N,
+                                      const Param params,
+                                      cudaStream_t stream,
+                                      mscclpp::DeviceSyncer* device_syncer) {
+  if (N != 0) {
+    auto align = CheckAlignment(N, nvec, input, output);
+
+    size_t num_aligned_elements = get_num_aligned_elements(input, N, nvec,
+                                                           sizeof(InputType));
+    constexpr size_t threads = unary_kernel_threads;
+    size_t num_blocks = DIVUP(num_aligned_elements, threads);
+    
+    // constexpr size_t max_blocks = 65535;
+    constexpr size_t max_blocks = 264;
+    num_blocks = std::min(num_blocks, max_blocks);
+
+    switch (align) {
+      case Alignment::SAME_ALIGNED:
+        add_to_fp8_kernel<nvec, true, fp32, Param, OP><<<num_blocks, threads, 0, stream>>>(
+            input, output, scale, scale_inv, amax, params, N, num_aligned_elements, device_syncer);
+        break;
+      case Alignment::SAME_UNALIGNED:
+        add_to_fp8_kernel<nvec, false, fp32, Param, OP><<<num_blocks, threads, 0, stream>>>(
+            input, output, scale, scale_inv, amax, params, N, num_aligned_elements, device_syncer);
+        break;
+      case Alignment::DIFFERENT: {
+        // If the pointers are aligned differently we cannot vectorize
+        add_to_fp8_kernel<1, true, fp32, Param, OP><<<num_blocks, threads, 0, stream>>>(
+            input, output, scale, scale_inv, amax, params, N, N, device_syncer);
+        break;
+      }
+    }
+  }
+}
+
 
 template <int nvec, typename Param,
           fp32 (*OP)(fp32, const Param&),

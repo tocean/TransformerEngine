@@ -37,6 +37,16 @@ void nvte_fp8_dequantize(const NVTETensor input,
                          NVTETensor output,
                          cudaStream_t stream);
 
+/*! \brief Add high precison tensor to FP8 tensor.
+ *
+ *  \param[in]     input     Input tensor to be cast.
+ *  \param[out]    output    Output tensor.
+ *  \param[in]     stream    CUDA stream used for the operation.
+ */
+void nvte_add_to_fp8(const NVTETensor input,
+                   NVTETensor output, 
+                   cudaStream_t stream);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif
