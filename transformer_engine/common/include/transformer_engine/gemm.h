@@ -54,6 +54,24 @@ void nvte_cublas_gemm(const NVTETensor A,
                       cudaStream_t stream
 );
 
+
+void nvte_cublas_gemm_msamp(const NVTETensor A,
+                      const NVTETensor B,
+                      const NVTETensor C,
+                      NVTETensor D,
+                      const NVTETensor bias,
+                      NVTETensor pre_gelu_out,
+                      bool transa,
+                      bool transb,
+                      bool grad,
+                      NVTETensor workspace,
+                      bool accumulate,
+                      bool use_split_accumulator,
+                      int math_sm_count,
+                      cudaStream_t stream
+);
+
+
 /*! \brief Compute matrix multiplication of 2 matrices with chunking and atomic counters.
  *
  * \warning   Cublas atomic gemm uses a beta API and is not tested for all use cases.

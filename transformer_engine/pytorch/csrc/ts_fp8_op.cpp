@@ -222,6 +222,72 @@ at::Tensor swiglu_ts(at::Tensor input,
   return output;
 }
 
+at::Tensor te_gemm_ts_msamp(at::Tensor A,
+                      at::Tensor A_scale_inverse,
+                      int64_t A_fp8_tensor,
+                      int64_t A_type,
+                      int64_t transa,
+                      at::Tensor B,
+                      at::Tensor B_scale_inverse,
+                      int64_t B_fp8_tensor,
+                      int64_t B_type,
+                      int64_t transb,
+                      at::Tensor C,
+                      at::Tensor D,
+                      at::Tensor D_scale,
+                      at::Tensor D_amax,
+                      int64_t D_type,
+                      at::Tensor bias,
+                      int64_t bias_type,
+                      at::Tensor pre_gelu_out,
+                      int64_t grad,
+                      at::Tensor workspace,
+                      int64_t workspaceSize,
+                      int64_t accumulate,
+                      int64_t use_split_accumulator) {
+  // cast inputs to types accepted by te_gemm
+  transformer_engine::DType A_type_arg = reverse_map_dtype(A_type);
+  bool transa_arg = static_cast<bool>(transa);
+  transformer_engine::DType B_type_arg = reverse_map_dtype(B_type);
+  bool transb_arg = static_cast<bool>(transb);
+  transformer_engine::DType D_type_arg = reverse_map_dtype(D_type);
+  transformer_engine::DType bias_type_arg = reverse_map_dtype(bias_type);
+  bool grad_arg = static_cast<bool>(grad);
+  size_t workspaceSize_arg = static_cast<size_t>(workspaceSize);
+  bool accumulate_arg = static_cast<bool>(accumulate);
+  bool use_split_accumulator_arg = static_cast<bool>(use_split_accumulator);
+
+  if (A_scale_inverse.numel())
+    A_scale_inverse = A_scale_inverse[A_fp8_tensor];
+
+  if (B_scale_inverse.numel())
+    B_scale_inverse = B_scale_inverse[B_fp8_tensor];
+
+  te_gemm_msamp(A,
+          A_scale_inverse,
+          A_type_arg,
+          transa_arg,
+          B,
+          B_scale_inverse,
+          B_type_arg,
+          transb_arg,
+          C,
+          D,
+          D_scale,
+          D_amax,
+          D_type_arg,
+          bias,
+          bias_type_arg,
+          pre_gelu_out,
+          grad_arg,
+          workspace,
+          workspaceSize_arg,
+          accumulate_arg,
+          use_split_accumulator_arg,
+          0);
+  return D;
+}
+
 at::Tensor te_gemm_ts(at::Tensor A,
                       at::Tensor A_scale_inverse,
                       int64_t A_fp8_tensor,
@@ -375,6 +441,7 @@ TORCH_LIBRARY(tex_ts, m) {
   m.def("reglu_ts", &reglu_ts);
   m.def("swiglu_ts", &swiglu_ts);
   m.def("te_gemm_ts", &te_gemm_ts);
+  m.def("te_gemm_ts_msamp", &te_gemm_ts_msamp);
   m.def("layernorm_fwd_fp8_inf_ts", &layernorm_fwd_fp8_inf_ts);
   m.def("layernorm_fwd_inf_ts", &layernorm_fwd_inf_ts);
   m.def("rmsnorm_fwd_fp8_inf_ts", &rmsnorm_fwd_fp8_inf_ts);

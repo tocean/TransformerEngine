@@ -179,6 +179,30 @@ void te_gemm(at::Tensor A,
              int math_sm_count
 );
 
+void te_gemm_msamp(at::Tensor A,
+             at::Tensor A_scale_inverse,
+             transformer_engine::DType A_type,
+             bool transa,
+             at::Tensor B,
+             at::Tensor B_scale_inverse,
+             transformer_engine::DType B_type,
+             bool transb,
+             at::Tensor C,
+             at::Tensor D,
+             at::Tensor D_scale,
+             at::Tensor D_amax,
+             transformer_engine::DType D_type,
+             at::Tensor bias,
+             transformer_engine::DType bias_type,
+             at::Tensor pre_gelu_out,
+             bool grad,
+             at::Tensor workspace,
+             size_t workspaceSize,
+             bool accumulate,
+             bool use_split_accumulator,
+             int math_sm_count
+);
+
 void te_atomic_gemm(at::Tensor A,
                     at::Tensor A_scale_inverse,
                     transformer_engine::DType A_type,
